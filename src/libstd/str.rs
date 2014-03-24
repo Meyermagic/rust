@@ -105,6 +105,7 @@ use slice::{Vector};
 use vec::Vec;
 use default::Default;
 use raw::Repr;
+use unicode::text_segmentation::cluster_boundary;
 
 /*
 Section: Creating a string
@@ -662,6 +663,63 @@ impl<'a> Iterator<char> for Normalizations<'a> {
         (lower, None)
     }
 }
+
+/// An iterator over a string's extended grapheme clusters, as defined in
+/// http://www.unicode.org/reports/tr29
+pub struct GraphemeClusters<'a> {
+    priv string: &'a str,
+    priv it: CharOffsets<'a>,
+    priv cluster_start: uint,
+    priv prev: char
+}
+
+impl<'a> Iterator<&'a str> for GraphemeClusters<'a> {
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        loop {
+            match self.it.next() {
+                Some((offset, c)) if offset == 0 => {
+                    //If we're at the very first character, always join it to the cluster.
+                    self.cluster_start = offset;
+                    self.prev = c;
+                }
+                Some((offset, c)) if cluster_boundary(self.prev, c) => {
+                    //Otherwise, if we hit a boundary between characters,
+                    // return the cluster's slice.
+                    let cluster_slice = self.string.slice(self.cluster_start, offset);
+                    self.cluster_start = offset;
+                    self.prev = c;
+                    return Some(cluster_slice);
+                }
+                Some((_, c)) => {
+                    //Else, loop until we hit a boundary.
+                    self.prev = c;
+                }
+                None if self.cluster_start < self.string.len() => {
+                    //When we hit the end of the string, return the remaining cluster slice, once.
+                    let cluster_slice = Some(self.string.slice_from(self.cluster_start));
+                    self.cluster_start = self.string.len();
+                    return cluster_slice;
+                }
+                None => {
+                    //Then return None forever.
+                    return None;
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (uint, Option<uint>) {
+        let (_, max_chars) = self.it.size_hint();
+        if self.cluster_start == self.string.len() {
+            (0, max_chars)
+        } else {
+            (1, max_chars)
+        }
+    }
+}
+
 
 /// Replace all occurrences of one string with another
 ///
@@ -2312,6 +2370,9 @@ pub trait StrSlice<'a> {
     /// and that it is not reallocated (e.g. by pushing to the
     /// string).
     fn as_ptr(&self) -> *u8;
+
+    /// An iterator over the grapheme clusters of a string.
+    fn clusters(&self) -> GraphemeClusters<'a>;
 }
 
 impl<'a> StrSlice<'a> for &'a str {
@@ -2791,6 +2852,13 @@ impl<'a> StrSlice<'a> for &'a str {
     #[inline]
     fn as_ptr(&self) -> *u8 {
         self.repr().data
+    }
+
+    fn clusters(&self) -> GraphemeClusters<'a> {
+        GraphemeClusters{string: *self,
+                         it: self.char_indices(),
+                         cluster_start: 0,
+                         prev: '\x00'}
     }
 }
 

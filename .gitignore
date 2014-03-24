@@ -89,3 +89,7 @@ build/
 i686-pc-mingw32/
 src/librustc/lib/llvmdeps.rs
 *.pot
+src/etc/DerivedCoreProperties.txt
+src/etc/GraphemeBreakProperty.txt
+src/etc/PropList.txt
+src/etc/UnicodeData.txt

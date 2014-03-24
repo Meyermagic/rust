@@ -19,13 +19,14 @@
 # programs". It is not meant to be a complete implementation of unicode.
 # For that we recommend you use a proper binding to libicu.
 
-import fileinput, re, os, sys, operator
+import fileinput, re, os, sys, operator, os.path
 
 
 def fetch(f):
     if not os.path.exists(f):
-        os.system("curl -O http://www.unicode.org/Public/UNIDATA/%s"
+        os.system("curl -O http://www.unicode.org/Public/%s"
                   % f)
+        return os.path.basename(f)
 
     if not os.path.exists(f):
         sys.stderr.write("cannot load %s" % f)
@@ -33,7 +34,7 @@ def fetch(f):
 
 
 def load_unicode_data(f):
-    fetch(f)
+    f = fetch(f)
     gencats = {}
     upperlower = {}
     lowerupper = {}
@@ -112,7 +113,7 @@ def load_unicode_data(f):
     return (canon_decomp, compat_decomp, gencats, combines, lowerupper, upperlower)
 
 def load_properties(f, interestingprops):
-    fetch(f)
+    f = fetch(f)
     props = {}
     re1 = re.compile("^([0-9A-F]+) +; (\w+)")
     re2 = re.compile("^([0-9A-F]+)\.\.([0-9A-F]+) +; (\w+)")
@@ -169,7 +170,27 @@ fn bsearch_range_table(c: char, r: &'static [(char,char)]) -> bool {
         else if hi < c { Less }
         else { Greater }
     }) != None
-}\n\n
+}\n
+""");
+
+def emit_bsearch_range_value_table(f):
+    f.write("""
+fn bsearch_range_value_table(c: char, r: &'static [(char, char, u8)]) -> u8 {
+    use cmp::{Equal, Less, Greater};
+    use slice::ImmutableVector;
+    use option::{Some, None};
+    match r.bsearch(|&(lo, hi, _)| {
+        if lo <= c && c <= hi { Equal }
+        else if hi < c { Less }
+        else { Greater }
+    }) {
+        Some(idx) => {
+            let (_, _, result) = r[idx];
+            result
+        }
+        None => 0
+    }
+}\n
 """);
 
 def emit_property_module(f, mod, tbl):
@@ -192,12 +213,12 @@ def emit_property_module(f, mod, tbl):
 
         f.write("    pub fn %s(c: char) -> bool {\n" % cat)
         f.write("        super::bsearch_range_table(c, %s_table)\n" % cat)
-        f.write("    }\n\n")
-    f.write("}\n")
+        f.write("    }\n")
+    f.write("}\n\n")
 
 
 def emit_conversions_module(f, lowerupper, upperlower):
-    f.write("pub mod conversions {\n")
+    f.write("pub mod conversions {")
     f.write("""
     use cmp::{Equal, Less, Greater};
     use slice::ImmutableVector;
@@ -231,7 +252,7 @@ def emit_conversions_module(f, lowerupper, upperlower):
     f.write("}\n")
 
 def emit_caseconversion_table(f, name, table):
-    f.write("   static %s_table : &'static [(char, char)] = &[\n" % name)
+    f.write("    static %s_table : &'static [(char, char)] = &[\n" % name)
     sorted_table = sorted(table.iteritems(), key=operator.itemgetter(0))
     ix = 0
     for key, value in sorted_table:
@@ -280,23 +301,6 @@ def emit_decomp_module(f, canon, compat, combine):
             None => None
         }
     }\n
-""")
-
-    f.write("""
-    fn bsearch_range_value_table(c: char, r: &'static [(char, char, u8)]) -> u8 {
-        use cmp::{Equal, Less, Greater};
-        match r.bsearch(|&(lo, hi, _)| {
-            if lo <= c && c <= hi { Equal }
-            else if hi < c { Less }
-            else { Greater }
-        }) {
-            Some(idx) => {
-                let (_, _, result) = r[idx];
-                result
-            }
-            None => 0
-        }
-    }\n\n
 """)
 
     f.write("    // Canonical decompositions\n")
@@ -350,7 +354,7 @@ def emit_decomp_module(f, canon, compat, combine):
     f.write("    pub fn compatibility(c: char, i: |char|) "
             +"{ d(c, i, true); }\n\n")
     f.write("    pub fn canonical_combining_class(c: char) -> u8 {\n"
-        + "        bsearch_range_value_table(c, combining_class_table)\n"
+        + "        super::bsearch_range_value_table(c, combining_class_table)\n"
         + "    }\n\n")
     f.write("    fn d(c: char, i: |char|, k: bool) {\n")
     f.write("        use iter::Iterator;\n");
@@ -389,6 +393,98 @@ def emit_decomp_module(f, canon, compat, combine):
     f.write("    }\n")
     f.write("}\n\n")
 
+def emit_text_segmentation_module(f, table):
+    #Start grapheme_cluster module
+    f.write("pub mod text_segmentation {\n");
+
+    #Cluster break enum
+    #http://www.unicode.org/reports/tr29/#Default_Grapheme_Cluster_Table
+    f.write("    #[allow(non_camel_case_types)]\n")
+    f.write("    #[repr(u8)]\n")
+    f.write("    enum GraphemeClusterBreakProperty {\n")
+    f.write("        Other,\n")
+    f.write("        CR,\n")
+    f.write("        LF,\n")
+    f.write("        Control,\n")
+    f.write("        Extend,\n")
+    f.write("        SpacingMark,\n")
+    f.write("        L,\n")
+    f.write("        V,\n")
+    f.write("        T,\n")
+    f.write("        LV,\n")
+    f.write("        LVT,\n")
+    f.write("        Regional_Indicator,\n")
+    f.write("        Prepend\n")
+    f.write("    }\n\n")
+
+    #Grapheme Cluster Boundary table
+    #http://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundary_Rules
+    #http://www.unicode.org/Public/UCD/latest/ucd/auxiliary/GraphemeBreakTest.html#table
+    f.write("    static cluster_boundary_table : &'static [[bool, ..13]] = &[\n")
+    f.write("        " #Other
+        "[true, true, true, true, false, false, true, true, true, true, true, true, true],\n")
+    f.write("        " #CR
+        "[true, true, false, true, true, true, true, true, true, true, true, true, true],\n")
+    f.write("        " #LF
+        "[true, true, true, true, true, true, true, true, true, true, true, true, true],\n")
+    f.write("        " #Control
+        "[true, true, true, true, true, true, true, true, true, true, true, true, true],\n")
+    f.write("        " #Extend
+        "[true, true, true, true, false, false, true, true, true, true, true, true, true],\n")
+    f.write("        " #SpacingMark
+        "[true, true, true, true, false, false, true, true, true, true, true, true, true],\n")
+    f.write("        " #L
+        "[true, true, true, true, false, false, false, false, true, false, false, true, true],\n")
+    f.write("        " #V
+        "[true, true, true, true, false, false, true, false, false, true, true, true, true],\n")
+    f.write("        " #T
+        "[true, true, true, true, false, false, true, true, false, true, true, true, true],\n")
+    f.write("        " #LV
+        "[true, true, true, true, false, false, true, false, false, true, true, true, true],\n")
+    f.write("        " #LVT
+        "[true, true, true, true, false, false, true, true, false, true, true, true, true],\n")
+    f.write("        " #Regional_Indicator
+        "[true, true, true, true, false, false, true, true, true, true, true, false, true],\n")
+    f.write("        " #Prepend
+        "[false, true, true, true, false, false, false, false, false, false, false, false, false]")
+    #End Grapheme cluster boundary table
+    f.write("];\n\n")
+
+    #Grapheme Cluster Break Property Table
+    #http://www.unicode.org/Public/UCD/latest/ucd/auxiliary/GraphemeBreakProperty.txt
+    #http://www.unicode.org/reports/tr29/#Grapheme_Cluster_Break_Property_Values
+    intervals = sorted(((pair[0], pair[1], key) for key, pairs in table.items()
+                                                for pair in pairs),
+                       key=lambda t: t[0])
+    f.write("    static break_property_table : &'static [(char, char, u8)] = &[\n")
+    for interval in intervals:
+        if 0xd800 <= interval[0] <= 0xdfff:
+            continue
+        if 0xd800 <= interval[1] <= 0xdfff:
+            continue
+        f.write("        (%s, %s, %s as u8),\n" % (escape_char(interval[0]),
+                                                   escape_char(interval[1]),
+                                                   interval[2]))
+    #End Grapheme Cluster Break Property Table
+    f.write("    ];\n\n")
+
+    #FIXME: Inline these functions?
+
+    #returns the cluster break property associated with the character
+    f.write("    fn break_property(c: char) -> u8 {\n")
+    f.write("        super::bsearch_range_value_table(c, break_property_table)\n")
+    f.write("    }\n\n")
+
+    #returns true if there is a cluster boundary between the first and second char
+    f.write("    pub fn cluster_boundary(c1: char, c2: char) -> bool {\n")
+    f.write("        let p1 = break_property(c1) as uint;\n")
+    f.write("        let p2 = break_property(c2) as uint;\n")
+    f.write("        cluster_boundary_table[p1][p2]\n")
+    f.write("    }\n\n")
+
+    #End grapheme_cluster module
+    f.write("}\n\n")
+
 r = "unicode.rs"
 for i in [r]:
     if os.path.exists(i):
@@ -396,7 +492,7 @@ for i in [r]:
 rf = open(r, "w")
 
 (canon_decomp, compat_decomp, gencats,
- combines, lowerupper, upperlower) = load_unicode_data("UnicodeData.txt")
+ combines, lowerupper, upperlower) = load_unicode_data("UNIDATA/UnicodeData.txt")
 
 # Preamble
 rf.write('''// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
@@ -413,19 +509,25 @@ rf.write('''// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGH
 
 #[allow(missing_doc)];
 #[allow(non_uppercase_statics)];
-
 ''')
 
 emit_bsearch_range_table(rf);
+emit_bsearch_range_value_table(rf);
 emit_property_module(rf, "general_category", gencats)
 
 emit_decomp_module(rf, canon_decomp, compat_decomp, combines)
 
-derived = load_properties("DerivedCoreProperties.txt",
+derived = load_properties("UNIDATA/DerivedCoreProperties.txt",
         ["XID_Start", "XID_Continue", "Alphabetic", "Lowercase", "Uppercase"])
 
 emit_property_module(rf, "derived_property", derived)
 
-props = load_properties("PropList.txt", ["White_Space"])
+props = load_properties("UNIDATA/PropList.txt", ["White_Space"])
 emit_property_module(rf, "property", props)
 emit_conversions_module(rf, lowerupper, upperlower)
+
+grapheme_break_properties = load_properties("UCD/latest/ucd/auxiliary/GraphemeBreakProperty.txt",
+        ["CR", "LF", "Control", "Extend", "Regional_Indicator", "Prepend", "SpacingMark",
+         "L", "V", "T", "LV", "LVT", "Other"])
+
+emit_text_segmentation_module(rf, grapheme_break_properties)
